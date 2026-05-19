@@ -4,7 +4,7 @@ export interface Env {
 
 type JoinRequest = { clientId: string; displayName?: string; password: string };
 type SignalEnvelope = { type: "signal"; from: string; payload: unknown };
-type PresenceEnvelope = { type: "presence"; members: string[] };
+type PresenceEnvelope = { type: "presence"; members: Array<{ id: string; displayName: string }> };
 
 type RoomState = {
   password: string;
@@ -104,7 +104,7 @@ export class Room implements DurableObject {
         this.onSignal(clientId, String(event.data));
       });
       server.addEventListener("close", () => this.leaveClient(clientId));
-      this.broadcastPresence();
+      void this.broadcastPresence();
 
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -133,11 +133,15 @@ export class Room implements DurableObject {
     delete state.members[clientId];
     await this.state.storage.put("state", state);
     if (this.activeCount(state) === 0) await this.state.storage.setAlarm(Date.now() + ROOM_TTL_MS);
-    this.broadcastPresence();
+    await this.broadcastPresence();
   }
 
-  private broadcastPresence(): void {
-    const members = [...this.sockets.keys()];
+  private async broadcastPresence(): Promise<void> {
+    const state = await this.getState();
+    const members = [...this.sockets.keys()].map((id) => ({
+      id,
+      displayName: state.members[id]?.displayName || "Guest",
+    }));
     const payload: PresenceEnvelope = { type: "presence", members };
     for (const socket of this.sockets.values()) socket.send(JSON.stringify(payload));
   }
@@ -167,7 +171,7 @@ function htmlResponse(body: string): Response {
 }
 
 function homeHtml(): string { return `<!doctype html><html lang="ja"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>開始</title><body>
-<h1>ビデオチャット開始</h1><input id="name" placeholder="名前(任意)"/><button id="create">ルーム作成</button><pre id="out"></pre>
+<h1>ビデオチャット開始</h1><input id="name" placeholder="名前(任意)"/><button id="create">ルーム作成</button><button id="copyPassword" disabled>パスワードをコピー</button><pre id="out"></pre>
 <script>
 create.onclick=async()=>{const r=await fetch('/api/rooms',{method:'POST'});const d=await r.json();const n=name.value?('?name='+encodeURIComponent(name.value)):'';const u=d.joinUrl+n;out.textContent='参加URL: '+u+'\\nパスワード: '+d.password;};
 </script></body></html>`; }
@@ -176,11 +180,11 @@ function roomHtml(roomId: string): string { return `<!doctype html><html lang="j
 <style>video{width:46vw;max-width:320px;aspect-ratio:1/1;object-fit:cover;background:#000}.mir{transform:scaleX(-1)}</style><body>
 <h2>ルーム ${roomId}</h2><input id="name" placeholder="名前(任意)"/><input id="password" placeholder="パスワード"/>
 <div><button id="copy">URLコピー</button><button id="join">参加</button><button id="mute">ミュートON/OFF</button><button id="cam">カメラON/OFF</button><button id="switchCam">カメラ切替</button><button id="mirror">ミラーON/OFF</button><button id="leave">退室</button></div>
-<video id="local" autoplay playsinline muted></video><video id="remote" autoplay playsinline></video><pre id="msg"></pre>
+<div><div>あなた: <span id="localName">-</span></div><div>相手: <span id="remoteName">-</span></div></div><video id="local" autoplay playsinline muted></video><video id="remote" autoplay playsinline></video><pre id="msg"></pre>
 <script>
 const roomId='${roomId}', clientId=localStorage.getItem('clientId')||crypto.randomUUID(); localStorage.setItem('clientId',clientId);
 const qs=new URLSearchParams(location.search); if(qs.get('name')) name.value=qs.get('name');
-let localStream, pc, ws, hb, facing='user', mirrorOn=true, camIndex=0, devices=[];
+let localStream, pc, ws, hb, facing='user', mirrorOn=true, camIndex=0, devices=[], members=[];
 const cfg={iceServers:[{urls:['stun:stun.l.google.com:19302']}]};
 copy.onclick=()=>navigator.clipboard.writeText(location.href);
 async function getStream(){devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
@@ -189,11 +193,13 @@ async function getStream(){devices=(await navigator.mediaDevices.enumerateDevice
 function applyMirror(){local.classList.toggle('mir',mirrorOn)}
 async function setupPc(){pc=new RTCPeerConnection(cfg); localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
  pc.ontrack=e=>remote.srcObject=e.streams[0]; pc.onicecandidate=e=>e.candidate&&ws.send(JSON.stringify({to:otherId(),payload:{candidate:e.candidate}}));}
-function otherId(){return (window.members||[]).find(id=>id!==clientId)}
+function myName(){return (name.value||'').trim()||'Guest'}
+function syncNames(){const me=members.find(m=>m.id===clientId);const peer=members.find(m=>m.id!==clientId);localName.textContent=(me&&me.displayName)||myName();remoteName.textContent=(peer&&peer.displayName)||'-';}
+function otherId(){const p=members.find(m=>m.id!==clientId);return p&&p.id}
 join.onclick=async()=>{await getStream(); const jr=await fetch('/api/rooms/'+roomId+'/join',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,password:password.value,displayName:name.value})});
  const jd=await jr.json(); if(!jr.ok){msg.textContent='参加失敗: '+(jd.error||jr.status);return;} hb=setInterval(()=>fetch('/api/rooms/'+roomId+'/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId})}),20000);
  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/rooms/'+roomId+'/ws?clientId='+encodeURIComponent(clientId)); ws.onmessage=async(ev)=>{const m=JSON.parse(ev.data);
- if(m.type==='presence'){window.members=m.members; if(m.members.length===2&&!pc){await setupPc(); if(clientId<m.members.find(i=>i!==clientId)){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); ws.send(JSON.stringify({to:otherId(),payload:{sdp:offer}}));}}
+ if(m.type==='presence'){members=m.members||[];syncNames(); if(members.length===2&&!pc){await setupPc(); const oid=otherId(); if(oid&&clientId<oid){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); ws.send(JSON.stringify({to:oid,payload:{sdp:offer}}));}}
  return;} if(m.type==='signal'){if(!pc) await setupPc(); const p=m.payload; if(p.sdp){await pc.setRemoteDescription(new RTCSessionDescription(p.sdp)); if(p.sdp.type==='offer'){const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); ws.send(JSON.stringify({to:m.from,payload:{sdp:ans}}));}} if(p.candidate) await pc.addIceCandidate(new RTCIceCandidate(p.candidate));}};
  msg.textContent='参加成功';};
 mute.onclick=()=>localStream&&localStream.getAudioTracks().forEach(t=>t.enabled=!t.enabled);
