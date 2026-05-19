@@ -3,12 +3,13 @@ export interface Env {
 }
 
 type JoinRequest = { clientId: string; displayName?: string; password: string };
+type LeaveRequest = { clientId: string; sessionToken?: string };
 type SignalEnvelope = { type: "signal"; from: string; payload: unknown };
 type PresenceEnvelope = { type: "presence"; members: Array<{ id: string; displayName: string }> };
 
 type RoomState = {
   password: string;
-  members: Record<string, { displayName: string; lastSeenAt: number }>;
+  members: Record<string, { displayName: string; lastSeenAt: number; sessionToken: string }>;
 };
 
 const ROOM_TTL_MS = 60_000;
@@ -71,16 +72,17 @@ export class Room implements DurableObject {
       if (body.password !== state.password) return json({ error: "wrong password" }, 401);
       this.cleanupStale(state);
       if (!state.members[body.clientId] && this.activeCount(state) >= MAX_MEMBERS) return json({ error: "room full" }, 409);
-      state.members[body.clientId] = { displayName: body.displayName?.trim() || "Guest", lastSeenAt: Date.now() };
+      const sessionToken = crypto.randomUUID();
+      state.members[body.clientId] = { displayName: body.displayName?.trim() || "Guest", lastSeenAt: Date.now(), sessionToken };
       await this.state.storage.put("state", state);
       await this.state.storage.deleteAlarm();
-      return json({ ok: true, activeMembers: this.activeCount(state) });
+      return json({ ok: true, activeMembers: this.activeCount(state), sessionToken });
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/heartbeat")) {
-      const { clientId } = (await request.json()) as { clientId: string };
+      const { clientId, sessionToken } = (await request.json()) as { clientId: string; sessionToken?: string };
       const state = await this.getState();
-      if (state.members[clientId]) {
+      if (state.members[clientId] && state.members[clientId].sessionToken === sessionToken) {
         state.members[clientId].lastSeenAt = Date.now();
         await this.state.storage.put("state", state);
       }
@@ -88,13 +90,18 @@ export class Room implements DurableObject {
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/leave")) {
-      const { clientId } = (await request.json()) as { clientId: string };
+      const { clientId, sessionToken } = (await request.json()) as LeaveRequest;
+      const state = await this.getState();
+      if (!state.members[clientId] || state.members[clientId].sessionToken !== sessionToken) return json({ error: "unauthorized" }, 401);
       await this.leaveClient(clientId);
       return json({ ok: true });
     }
 
     if (request.method === "GET" && url.pathname.endsWith("/ws")) {
       const clientId = url.searchParams.get("clientId") ?? "";
+      const sessionToken = url.searchParams.get("sessionToken") ?? "";
+      const current = await this.getState();
+      if (!current.members[clientId] || current.members[clientId].sessionToken !== sessionToken) return json({ error: "unauthorized" }, 401);
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
@@ -184,7 +191,7 @@ function roomHtml(roomId: string): string { return `<!doctype html><html lang="j
 <script>
 const roomId='${roomId}', clientId=localStorage.getItem('clientId')||crypto.randomUUID(); localStorage.setItem('clientId',clientId);
 const qs=new URLSearchParams(location.search); if(qs.get('name')) name.value=qs.get('name');
-let localStream, pc, ws, hb, facing='user', mirrorOn=true, camIndex=0, devices=[], members=[];
+let localStream, pc, hb, facing='user', mirrorOn=true, camIndex=0, devices=[], members=[], ws, sessionToken="";
 const cfg={iceServers:[{urls:['stun:stun.l.google.com:19302']}]};
 copy.onclick=()=>navigator.clipboard.writeText(location.href);
 async function getStream(){devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
@@ -197,8 +204,8 @@ function myName(){return (name.value||'').trim()||'Guest'}
 function syncNames(){const me=members.find(m=>m.id===clientId);const peer=members.find(m=>m.id!==clientId);localName.textContent=(me&&me.displayName)||myName();remoteName.textContent=(peer&&peer.displayName)||'-';}
 function otherId(){const p=members.find(m=>m.id!==clientId);return p&&p.id}
 join.onclick=async()=>{await getStream(); const jr=await fetch('/api/rooms/'+roomId+'/join',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,password:password.value,displayName:name.value})});
- const jd=await jr.json(); if(!jr.ok){msg.textContent='参加失敗: '+(jd.error||jr.status);return;} hb=setInterval(()=>fetch('/api/rooms/'+roomId+'/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId})}),20000);
- ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/rooms/'+roomId+'/ws?clientId='+encodeURIComponent(clientId)); ws.onmessage=async(ev)=>{const m=JSON.parse(ev.data);
+ const jd=await jr.json(); if(!jr.ok){msg.textContent='参加失敗: '+(jd.error||jr.status);return;} sessionToken=jd.sessionToken||''; hb=setInterval(()=>fetch('/api/rooms/'+roomId+'/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,sessionToken})}),20000);
+ ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/rooms/'+roomId+'/ws?clientId='+encodeURIComponent(clientId)+'&sessionToken='+encodeURIComponent(sessionToken)); ws.onmessage=async(ev)=>{const m=JSON.parse(ev.data);
  if(m.type==='presence'){members=m.members||[];syncNames(); if(members.length===2&&!pc){await setupPc(); const oid=otherId(); if(oid&&clientId<oid){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); ws.send(JSON.stringify({to:oid,payload:{sdp:offer}}));}}
  return;} if(m.type==='signal'){if(!pc) await setupPc(); const p=m.payload; if(p.sdp){await pc.setRemoteDescription(new RTCSessionDescription(p.sdp)); if(p.sdp.type==='offer'){const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); ws.send(JSON.stringify({to:m.from,payload:{sdp:ans}}));}} if(p.candidate) await pc.addIceCandidate(new RTCIceCandidate(p.candidate));}};
  msg.textContent='参加成功';};
@@ -206,6 +213,6 @@ mute.onclick=()=>localStream&&localStream.getAudioTracks().forEach(t=>t.enabled=
 cam.onclick=()=>localStream&&localStream.getVideoTracks().forEach(t=>t.enabled=!t.enabled);
 switchCam.onclick=async()=>{if(!devices.length)return;camIndex=(camIndex+1)%devices.length;const old=localStream;await getStream();if(pc){const s=pc.getSenders().find(x=>x.track&&x.track.kind==='video');if(s)await s.replaceTrack(localStream.getVideoTracks()[0]);}old&&old.getTracks().forEach(t=>t.stop());facing=(facing==='user'?'environment':'user');if(facing==='user'&&mirrorOn===false){mirrorOn=true;applyMirror();}if(facing!=='user'&&mirrorOn===true){mirrorOn=false;applyMirror();}};
 mirror.onclick=()=>{mirrorOn=!mirrorOn;applyMirror();if(pc){const track=localStream.getVideoTracks()[0];const p=pc.getSenders().find(s=>s.track&&s.track.kind==='video'); p&&p.replaceTrack(track);}};
-leave.onclick=async()=>{clearInterval(hb);ws&&ws.close();pc&&pc.close();localStream&&localStream.getTracks().forEach(t=>t.stop());await fetch('/api/rooms/'+roomId+'/leave',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId})});msg.textContent='退室';};
-addEventListener('beforeunload',()=>navigator.sendBeacon('/api/rooms/'+roomId+'/leave',new Blob([JSON.stringify({clientId})],{type:'application/json'})));
+leave.onclick=async()=>{clearInterval(hb);ws&&ws.close();pc&&pc.close();localStream&&localStream.getTracks().forEach(t=>t.stop());await fetch('/api/rooms/'+roomId+'/leave',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,sessionToken})});msg.textContent='退室';};
+addEventListener('beforeunload',()=>navigator.sendBeacon('/api/rooms/'+roomId+'/leave',new Blob([JSON.stringify({clientId,sessionToken})],{type:'application/json'})));
 </script></body></html>`; }
