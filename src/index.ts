@@ -186,9 +186,10 @@ const copyUrl=document.getElementById('copyUrl');
 const copyPassword=document.getElementById('copyPassword');
 let createdUrl='';
 let createdPassword='';
+function msg(t){out.textContent=(out.textContent?out.textContent+'\n':'')+t;}
 document.getElementById('create').onclick=async()=>{const r=await fetch('/api/rooms',{method:'POST'});const d=await r.json();const n=nameInput.value?('?name='+encodeURIComponent(nameInput.value)):'';createdUrl=d.joinUrl+n;createdPassword=d.password;copyUrl.disabled=false;copyPassword.disabled=false;out.textContent='参加URL: '+createdUrl+'\nパスワード: '+createdPassword;};
-copyUrl.onclick=()=>createdUrl&&navigator.clipboard.writeText(createdUrl);
-copyPassword.onclick=()=>createdPassword&&navigator.clipboard.writeText(createdPassword);
+copyUrl.onclick=async()=>{if(!createdUrl)return;await navigator.clipboard.writeText(createdUrl);msg('URLをコピーしました');};
+copyPassword.onclick=async()=>{if(!createdPassword)return;await navigator.clipboard.writeText(createdPassword);msg('パスワードをコピーしました');};
 </script></body></html>`; }
 
 function roomHtml(roomId: string): string { return `<!doctype html><html lang="ja"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>参加</title>
