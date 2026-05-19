@@ -150,7 +150,7 @@ document.getElementById('create').onclick = async () => {
  const r = await fetch('/api/rooms',{method:'POST'}); const d = await r.json();
  const name = document.getElementById('name').value || '';
  const join = d.joinUrl + (name ? ('?name='+encodeURIComponent(name)) : '');
- document.getElementById('out').textContent = `参加URL: ${join}\nパスワード: ${d.password}`;
+ document.getElementById('out').textContent = '参加URL: ' + join + '\nパスワード: ' + d.password;
 };
 </script></body></html>`; }
 
