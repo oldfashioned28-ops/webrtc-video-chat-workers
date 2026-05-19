@@ -178,9 +178,17 @@ function htmlResponse(body: string): Response {
 }
 
 function homeHtml(): string { return `<!doctype html><html lang="ja"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>開始</title><body>
-<h1>ビデオチャット開始</h1><input id="name" placeholder="名前(任意)"/><button id="create">ルーム作成</button><button id="copyPassword" disabled>パスワードをコピー</button><pre id="out"></pre>
+<h1>ビデオチャット開始</h1><input id="name" placeholder="名前(任意)"/><button id="create">ルーム作成</button><button id="copyUrl" disabled>URLコピー</button><button id="copyPassword" disabled>パスワードをコピー</button><pre id="out"></pre>
 <script>
-create.onclick=async()=>{const r=await fetch('/api/rooms',{method:'POST'});const d=await r.json();const n=name.value?('?name='+encodeURIComponent(name.value)):'';const u=d.joinUrl+n;out.textContent='参加URL: '+u+'\\nパスワード: '+d.password;};
+const nameInput=document.getElementById('name');
+const out=document.getElementById('out');
+const copyUrl=document.getElementById('copyUrl');
+const copyPassword=document.getElementById('copyPassword');
+let createdUrl='';
+let createdPassword='';
+document.getElementById('create').onclick=async()=>{const r=await fetch('/api/rooms',{method:'POST'});const d=await r.json();const n=nameInput.value?('?name='+encodeURIComponent(nameInput.value)):'';createdUrl=d.joinUrl+n;createdPassword=d.password;copyUrl.disabled=false;copyPassword.disabled=false;out.textContent='参加URL: '+createdUrl+'\nパスワード: '+createdPassword;};
+copyUrl.onclick=()=>createdUrl&&navigator.clipboard.writeText(createdUrl);
+copyPassword.onclick=()=>createdPassword&&navigator.clipboard.writeText(createdPassword);
 </script></body></html>`; }
 
 function roomHtml(roomId: string): string { return `<!doctype html><html lang="ja"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>参加</title>
@@ -190,7 +198,9 @@ function roomHtml(roomId: string): string { return `<!doctype html><html lang="j
 <div><div>あなた: <span id="localName">-</span></div><div>相手: <span id="remoteName">-</span></div><div>ミュート: <span id="muteState">OFF</span></div><div>ミラー: <span id="mirrorState">ON</span></div></div><video id="local" autoplay playsinline muted></video><video id="remote" autoplay playsinline></video><pre id="msg"></pre>
 <script>
 const roomId='${roomId}', clientId=localStorage.getItem('clientId')||crypto.randomUUID(); localStorage.setItem('clientId',clientId);
-const qs=new URLSearchParams(location.search); if(qs.get('name')) name.value=qs.get('name');
+const nameInput=document.getElementById('name');
+const passwordInput=document.getElementById('password');
+const qs=new URLSearchParams(location.search); if(qs.get('name')) nameInput.value=qs.get('name');
 let localStream, pc, hb, facing='user', mirrorOn=true, camIndex=0, devices=[], members=[], ws, sessionToken="";
 const cfg={iceServers:[{urls:['stun:stun.l.google.com:19302']}]};
 mirrorState.textContent=mirrorOn?'ON':'OFF';
@@ -201,11 +211,11 @@ async function getStream(){devices=(await navigator.mediaDevices.enumerateDevice
 function applyMirror(){local.classList.toggle('mir',mirrorOn);mirrorState.textContent=mirrorOn?'ON':'OFF'}
 async function setupPc(){pc=new RTCPeerConnection(cfg); localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
  pc.ontrack=e=>remote.srcObject=e.streams[0]; pc.onicecandidate=e=>e.candidate&&ws.send(JSON.stringify({to:otherId(),payload:{candidate:e.candidate}}));}
-function myName(){return (name.value||'').trim()||'Guest'}
+function myName(){return (nameInput.value||'').trim()||'Guest'}
 function syncNames(){const me=members.find(m=>m.id===clientId);const peer=members.find(m=>m.id!==clientId);localName.textContent=(me&&me.displayName)||myName();remoteName.textContent=(peer&&peer.displayName)||'-';}
 function syncMuteState(){if(!localStream){muteState.textContent='OFF';return;}const t=localStream.getAudioTracks()[0];muteState.textContent=(t&&t.enabled===false)?'ON':'OFF';}
 function otherId(){const p=members.find(m=>m.id!==clientId);return p&&p.id}
-join.onclick=async()=>{await getStream(); const jr=await fetch('/api/rooms/'+roomId+'/join',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,password:password.value,displayName:name.value})});
+join.onclick=async()=>{await getStream(); const jr=await fetch('/api/rooms/'+roomId+'/join',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,password:passwordInput.value,displayName:nameInput.value})});
  const jd=await jr.json(); if(!jr.ok){msg.textContent='参加失敗: '+(jd.error||jr.status);return;} sessionToken=jd.sessionToken||''; hb=setInterval(()=>fetch('/api/rooms/'+roomId+'/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,sessionToken})}),20000);
  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/rooms/'+roomId+'/ws?clientId='+encodeURIComponent(clientId)+'&sessionToken='+encodeURIComponent(sessionToken)); ws.onmessage=async(ev)=>{const m=JSON.parse(ev.data);
  if(m.type==='presence'){members=m.members||[];syncNames(); if(members.length===2&&!pc){await setupPc(); const oid=otherId(); if(oid&&clientId<oid){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); ws.send(JSON.stringify({to:oid,payload:{sdp:offer}}));}}
