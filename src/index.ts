@@ -187,29 +187,31 @@ function roomHtml(roomId: string): string { return `<!doctype html><html lang="j
 <style>video{width:46vw;max-width:320px;aspect-ratio:1/1;object-fit:cover;background:#000}.mir{transform:scaleX(-1)}</style><body>
 <h2>ルーム ${roomId}</h2><input id="name" placeholder="名前(任意)"/><input id="password" placeholder="パスワード"/>
 <div><button id="copy">URLコピー</button><button id="join">参加</button><button id="mute">ミュートON/OFF</button><button id="cam">カメラON/OFF</button><button id="switchCam">カメラ切替</button><button id="mirror">ミラーON/OFF</button><button id="leave">退室</button></div>
-<div><div>あなた: <span id="localName">-</span></div><div>相手: <span id="remoteName">-</span></div></div><video id="local" autoplay playsinline muted></video><video id="remote" autoplay playsinline></video><pre id="msg"></pre>
+<div><div>あなた: <span id="localName">-</span></div><div>相手: <span id="remoteName">-</span></div><div>ミュート: <span id="muteState">OFF</span></div><div>ミラー: <span id="mirrorState">ON</span></div></div><video id="local" autoplay playsinline muted></video><video id="remote" autoplay playsinline></video><pre id="msg"></pre>
 <script>
 const roomId='${roomId}', clientId=localStorage.getItem('clientId')||crypto.randomUUID(); localStorage.setItem('clientId',clientId);
 const qs=new URLSearchParams(location.search); if(qs.get('name')) name.value=qs.get('name');
 let localStream, pc, hb, facing='user', mirrorOn=true, camIndex=0, devices=[], members=[], ws, sessionToken="";
 const cfg={iceServers:[{urls:['stun:stun.l.google.com:19302']}]};
+mirrorState.textContent=mirrorOn?'ON':'OFF';
 copy.onclick=()=>navigator.clipboard.writeText(location.href);
 async function getStream(){devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
  const c = devices[camIndex]?.deviceId ? {deviceId:{exact:devices[camIndex].deviceId}} : {facingMode:{ideal:facing}};
  localStream = await navigator.mediaDevices.getUserMedia({video:c,audio:true}); local.srcObject=localStream; applyMirror();}
-function applyMirror(){local.classList.toggle('mir',mirrorOn)}
+function applyMirror(){local.classList.toggle('mir',mirrorOn);mirrorState.textContent=mirrorOn?'ON':'OFF'}
 async function setupPc(){pc=new RTCPeerConnection(cfg); localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
  pc.ontrack=e=>remote.srcObject=e.streams[0]; pc.onicecandidate=e=>e.candidate&&ws.send(JSON.stringify({to:otherId(),payload:{candidate:e.candidate}}));}
 function myName(){return (name.value||'').trim()||'Guest'}
 function syncNames(){const me=members.find(m=>m.id===clientId);const peer=members.find(m=>m.id!==clientId);localName.textContent=(me&&me.displayName)||myName();remoteName.textContent=(peer&&peer.displayName)||'-';}
+function syncMuteState(){if(!localStream){muteState.textContent='OFF';return;}const t=localStream.getAudioTracks()[0];muteState.textContent=(t&&t.enabled===false)?'ON':'OFF';}
 function otherId(){const p=members.find(m=>m.id!==clientId);return p&&p.id}
 join.onclick=async()=>{await getStream(); const jr=await fetch('/api/rooms/'+roomId+'/join',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,password:password.value,displayName:name.value})});
  const jd=await jr.json(); if(!jr.ok){msg.textContent='参加失敗: '+(jd.error||jr.status);return;} sessionToken=jd.sessionToken||''; hb=setInterval(()=>fetch('/api/rooms/'+roomId+'/heartbeat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({clientId,sessionToken})}),20000);
  ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/rooms/'+roomId+'/ws?clientId='+encodeURIComponent(clientId)+'&sessionToken='+encodeURIComponent(sessionToken)); ws.onmessage=async(ev)=>{const m=JSON.parse(ev.data);
  if(m.type==='presence'){members=m.members||[];syncNames(); if(members.length===2&&!pc){await setupPc(); const oid=otherId(); if(oid&&clientId<oid){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); ws.send(JSON.stringify({to:oid,payload:{sdp:offer}}));}}
  return;} if(m.type==='signal'){if(!pc) await setupPc(); const p=m.payload; if(p.sdp){await pc.setRemoteDescription(new RTCSessionDescription(p.sdp)); if(p.sdp.type==='offer'){const ans=await pc.createAnswer(); await pc.setLocalDescription(ans); ws.send(JSON.stringify({to:m.from,payload:{sdp:ans}}));}} if(p.candidate) await pc.addIceCandidate(new RTCIceCandidate(p.candidate));}};
- msg.textContent='参加成功';};
-mute.onclick=()=>localStream&&localStream.getAudioTracks().forEach(t=>t.enabled=!t.enabled);
+ syncMuteState();applyMirror();msg.textContent='参加成功';};
+mute.onclick=()=>{localStream&&localStream.getAudioTracks().forEach(t=>t.enabled=!t.enabled);syncMuteState();};
 cam.onclick=()=>localStream&&localStream.getVideoTracks().forEach(t=>t.enabled=!t.enabled);
 switchCam.onclick=async()=>{if(!devices.length)return;camIndex=(camIndex+1)%devices.length;const old=localStream;await getStream();if(pc){const s=pc.getSenders().find(x=>x.track&&x.track.kind==='video');if(s)await s.replaceTrack(localStream.getVideoTracks()[0]);}old&&old.getTracks().forEach(t=>t.stop());facing=(facing==='user'?'environment':'user');if(facing==='user'&&mirrorOn===false){mirrorOn=true;applyMirror();}if(facing!=='user'&&mirrorOn===true){mirrorOn=false;applyMirror();}};
 mirror.onclick=()=>{mirrorOn=!mirrorOn;applyMirror();if(pc){const track=localStream.getVideoTracks()[0];const p=pc.getSenders().find(s=>s.track&&s.track.kind==='video'); p&&p.replaceTrack(track);}};
